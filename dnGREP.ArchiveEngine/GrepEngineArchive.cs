@@ -38,9 +38,11 @@ namespace dnGREP.Engines.Archive
         {
             List<GrepSearchResult> searchResults = new List<GrepSearchResult>();
 
+            var filter = FileFilter.ToStandardFilter();
+
             var includeRegexPatterns = new List<Regex>();
             var excludeRegexPatterns = new List<Regex>();
-            Utils.PrepareFilters(FileFilter, includeRegexPatterns, excludeRegexPatterns);
+            Utils.PrepareFilters(filter, includeRegexPatterns, excludeRegexPatterns);
 
             List<string> hiddenDirectories = new List<string>();
 
@@ -55,16 +57,16 @@ namespace dnGREP.Engines.Archive
 
                         if (fileInfo.IsDirectory)
                         {
-                            if (!FileFilter.IncludeHidden && attr.HasFlag(FileAttributes.Hidden) && !hiddenDirectories.Contains(innerFileName))
+                            if (!filter.IncludeHidden && attr.HasFlag(FileAttributes.Hidden) && !hiddenDirectories.Contains(innerFileName))
                                 hiddenDirectories.Add(innerFileName);
 
                             continue;
                         }
 
-                        if (CheckHidden(FileFilter, attr) &&
-                            CheckHidden(FileFilter, innerFileName, hiddenDirectories) &&
-                            CheckSize(FileFilter, fileInfo.Size) &&
-                            CheckDate(FileFilter, fileInfo) &&
+                        if (CheckHidden(filter, attr) &&
+                            CheckHidden(filter, innerFileName, hiddenDirectories) &&
+                            CheckSize(filter, fileInfo.Size) &&
+                            CheckDate(filter, fileInfo) &&
                             IsPatternMatch(innerFileName, includeRegexPatterns) &&
                             !IsPatternMatch(innerFileName, excludeRegexPatterns))
                         {
@@ -73,9 +75,9 @@ namespace dnGREP.Engines.Archive
                                 extractor.ExtractFile(innerFileName, stream);
                                 stream.Seek(0, SeekOrigin.Begin);
 
-                                if (CheckBinary(FileFilter, stream))
+                                if (CheckBinary(filter, stream))
                                 {
-                                    IGrepEngine engine = GrepEngineFactory.GetSearchEngine(innerFileName, initParams, FileFilter);
+                                    IGrepEngine engine = GrepEngineFactory.GetSearchEngine(innerFileName, initParams, filter);
                                     var innerFileResults = engine.Search(stream, innerFileName, searchPattern, searchType, searchOptions, encoding);
 
                                     if (innerFileResults.Count > 0)
@@ -98,6 +100,8 @@ namespace dnGREP.Engines.Archive
                                             searchResults.AddRange(innerFileResults);
                                         }
                                     }
+
+                                    GrepEngineFactory.ReturnToPool(innerFileName, engine);
                                 }
                                 if (Utils.CancelSearch)
                                     break;
@@ -249,7 +253,7 @@ namespace dnGREP.Engines.Archive
                 }
             }
 
-            if (Utils.IsPdfFile(filePath) || Utils.IsWordFile(filePath))
+            if (Utils.IsPdfFile(filePath) || Utils.IsWordFile(filePath) || Utils.IsExcelFile(filePath))
                 args.UseCustomEditor = false;
 
             GrepSearchResult newResult = new GrepSearchResult();

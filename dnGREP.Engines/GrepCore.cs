@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using dnGREP.Engines;
 using NLog;
 
@@ -9,9 +12,14 @@ namespace dnGREP.Common
 {
     public class GrepCore
     {
+        private static Logger logger = LogManager.GetCurrentClassLogger();
+
+        public delegate void SearchProgressHandler(object sender, ProgressStatus files);
+        public event SearchProgressHandler ProcessedFile = delegate { };
+
         public GrepCore()
         {
-            SearchParams = new GrepEngineInitParams();
+            SearchParams = GrepEngineInitParams.Default;
             FileFilter = new FileFilter();
         }
 
@@ -19,22 +27,11 @@ namespace dnGREP.Common
         public FileFilter FileFilter { get; set; }
 
 
-        private static Logger logger = LogManager.GetCurrentClassLogger();
         private List<GrepSearchResult> searchResults = new List<GrepSearchResult>();
-        public delegate void SearchProgressHandler(object sender, ProgressStatus files);
-        public event SearchProgressHandler ProcessedFile = delegate { };
-        public class ProgressStatus
-        {
-            public ProgressStatus(int processed, List<GrepSearchResult> results, string fileName)
-            {
-                ProcessedFiles = processed;
-                SearchResults = results;
-                FileName = fileName;
-            }
-            public int ProcessedFiles;
-            public List<GrepSearchResult> SearchResults;
-            public string FileName;
-        }
+        private object lockObj = new object();
+        private CancellationTokenSource cancellationTokenSource;
+        private int processedFilesCount;
+        private int foundfilesCount;
 
         /// <summary>
         /// Searches folder for files whose content matches regex
@@ -44,7 +41,7 @@ namespace dnGREP.Common
         /// <returns>List of results. If nothing is found returns empty list</returns>
         public List<GrepSearchResult> Search(IEnumerable<string> files, SearchType searchType, string searchPattern, GrepSearchOption searchOptions, int codePage)
         {
-            List<GrepSearchResult> searchResults = new List<GrepSearchResult>();
+            searchResults.Clear();
 
             if (files == null)
                 return searchResults;
@@ -53,86 +50,154 @@ namespace dnGREP.Common
 
             if (searchPattern == null || searchPattern.Trim() == "")
             {
+                int count = 0;
                 foreach (string file in files)
                 {
-                    ProcessedFile(this, new ProgressStatus(searchResults.Count, null, file));
+                    count++;
+                    ProcessedFile(this, new ProgressStatus(true, searchResults.Count, count, null, file));
 
                     searchResults.Add(new GrepSearchResult(file, searchPattern, null, Encoding.Default));
+
                     if ((searchOptions & GrepSearchOption.StopAfterFirstMatch) == GrepSearchOption.StopAfterFirstMatch)
                         break;
                     if (Utils.CancelSearch)
                         break;
                 }
 
-                ProcessedFile(this, new ProgressStatus(searchResults.Count, searchResults, null));
+                ProcessedFile(this, new ProgressStatus(false, searchResults.Count, count, searchResults, null));
 
-                return searchResults;
+                return new List<GrepSearchResult>(searchResults);
             }
             else
             {
-                int processedFiles = 0;
+                processedFilesCount = 0;
+                foundfilesCount = 0;
 
                 try
                 {
-                    foreach (string file in files)
+                    if (SearchParams.SearchParallel)
                     {
-                        ProcessedFile(this, new ProgressStatus(processedFiles, null, file));
-                        try
-                        {
-                            IGrepEngine engine = GrepEngineFactory.GetSearchEngine(file, SearchParams, FileFilter);
+                        cancellationTokenSource = new CancellationTokenSource();
 
-                            processedFiles++;
-
-                            Encoding encoding = Encoding.Default;
-                            if (codePage > -1)
-                                encoding = Encoding.GetEncoding(codePage);
-                            else if (!Utils.IsBinary(file) && !Utils.IsPdfFile(file))
-                                encoding = Utils.GetFileEncoding(file);
-
-                            if (Utils.CancelSearch)
-                            {
-                                return searchResults;
-                            }
-
-                            List<GrepSearchResult> fileSearchResults = engine.Search(file, searchPattern, searchType, searchOptions, encoding);
-
-                            if (fileSearchResults != null && fileSearchResults.Count > 0)
-                            {
-                                searchResults.AddRange(fileSearchResults);
-                            }
-
-                            ProcessedFile(this, new ProgressStatus(processedFiles, fileSearchResults, file));
-                        }
-                        catch (Exception ex)
-                        {
-                            logger.Log<Exception>(LogLevel.Error, ex.Message, ex);
-                            searchResults.Add(new GrepSearchResult(file, searchPattern, ex.Message, false));
-                            if (ProcessedFile != null)
-                            {
-                                List<GrepSearchResult> _results = new List<GrepSearchResult>();
-                                _results.Add(new GrepSearchResult(file, searchPattern, ex.Message, false));
-                                ProcessedFile(this, new ProgressStatus(processedFiles, _results, file));
-                            }
-                        }
-
-                        if ((searchOptions & GrepSearchOption.StopAfterFirstMatch) == GrepSearchOption.StopAfterFirstMatch && searchResults.Count > 0)
-                            break;
+                        ParallelOptions po = new ParallelOptions();
+                        po.MaxDegreeOfParallelism = Environment.ProcessorCount * 4 / 5;
+                        po.CancellationToken = cancellationTokenSource.Token;
+                        Parallel.ForEach(files, po, f => Search(f, searchType, searchPattern, searchOptions, codePage));
                     }
+                    else
+                    {
+                        foreach (var file in files)
+                        {
+                            Search(file, searchType, searchPattern, searchOptions, codePage);
+
+                            if (searchOptions.HasFlag(GrepSearchOption.StopAfterFirstMatch) && searchResults.Count > 0)
+                                break;
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // expected for stop after first match or user cancel
+                }
+                catch (Exception ex)
+                {
+                    logger.Error(ex, "Failed in search in files");
                 }
                 finally
                 {
+                    if (cancellationTokenSource != null)
+                    {
+                        cancellationTokenSource.Dispose();
+                        cancellationTokenSource = null;
+                    }
                     GrepEngineFactory.UnloadEngines();
                 }
 
-                return searchResults;
+                return new List<GrepSearchResult>(searchResults);
             }
         }
 
-        public int Replace(IEnumerable<string> files, SearchType searchType, string searchPattern, string replacePattern, GrepSearchOption searchOptions, int codePage)
+        private void AddSearchResult(GrepSearchResult result)
+        {
+            lock (lockObj)
+            {
+                searchResults.Add(result);
+            }
+        }
+
+        private void AddSearchResults(IEnumerable<GrepSearchResult> results)
+        {
+            lock (lockObj)
+            {
+                if (results.Any())
+                {
+                    searchResults.AddRange(results);
+                }
+            }
+        }
+
+        private void Search(string file, SearchType searchType, string searchPattern, GrepSearchOption searchOptions, int codePage)
+        {
+            try
+            {
+                ProcessedFile(this, new ProgressStatus(true, processedFilesCount, foundfilesCount, null, file));
+
+                IGrepEngine engine = GrepEngineFactory.GetSearchEngine(file, SearchParams, FileFilter);
+
+                Interlocked.Increment(ref processedFilesCount);
+
+                Encoding encoding = Encoding.Default;
+                if (codePage > -1)
+                    encoding = Encoding.GetEncoding(codePage);
+                else if (!Utils.IsBinary(file) && !Utils.IsPdfFile(file))
+                    encoding = Utils.GetFileEncoding(file);
+
+                if (Utils.CancelSearch)
+                {
+                    if (cancellationTokenSource != null)
+                        cancellationTokenSource.Cancel();
+                    return;
+                }
+
+                List<GrepSearchResult> fileSearchResults = engine.Search(file, searchPattern, searchType, searchOptions, encoding);
+
+                if (fileSearchResults != null && fileSearchResults.Count > 0)
+                {
+                    AddSearchResults(fileSearchResults);
+                }
+                int hits = fileSearchResults.Where(r => r.IsSuccess).Count();
+                Interlocked.Add(ref foundfilesCount, hits);
+
+                ProcessedFile(this, new ProgressStatus(false, processedFilesCount, foundfilesCount, fileSearchResults, file));
+
+                GrepEngineFactory.ReturnToPool(file, engine);
+            }
+            catch (Exception ex)
+            {
+                logger.Log<Exception>(LogLevel.Error, ex.Message, ex);
+                AddSearchResult(new GrepSearchResult(file, searchPattern, ex.Message, false));
+                if (ProcessedFile != null)
+                {
+                    List<GrepSearchResult> _results = new List<GrepSearchResult>();
+                    _results.Add(new GrepSearchResult(file, searchPattern, ex.Message, false));
+                    ProcessedFile(this, new ProgressStatus(false, processedFilesCount, foundfilesCount, _results, file));
+                }
+            }
+            finally
+            {
+                if ((searchOptions & GrepSearchOption.StopAfterFirstMatch) == GrepSearchOption.StopAfterFirstMatch && searchResults.Count > 0)
+                {
+                    if (cancellationTokenSource != null)
+                        cancellationTokenSource.Cancel();
+                }
+            }
+        }
+
+        public int Replace(Dictionary<string, string> files, SearchType searchType, string searchPattern, string replacePattern, GrepSearchOption searchOptions, int codePage)
         {
             string tempFolder = Utils.GetTempFolder();
 
-            if (files == null || !Directory.Exists(tempFolder))
+            if (files == null || files.Count == 0 || !Directory.Exists(tempFolder))
                 return 0;
 
             replacePattern = Utils.ReplaceSpecialCharacters(replacePattern);
@@ -143,11 +208,13 @@ namespace dnGREP.Common
 
             try
             {
-                foreach (string file in files)
+                foreach (string file in files.Keys)
                 {
-                    ProcessedFile(this, new ProgressStatus(processedFiles, null, file));
+                    ProcessedFile(this, new ProgressStatus(true, processedFiles, processedFiles, null, file));
 
-                    tempFileName = Path.Combine(tempFolder, Path.GetFileName(file));
+                    // the value in the files dictionary is the temp file name assigned by
+                    // the caller for any possible Undo operation
+                    tempFileName = Path.Combine(tempFolder, files[file]);
                     IGrepEngine engine = GrepEngineFactory.GetReplaceEngine(file, SearchParams, FileFilter);
 
                     try
@@ -174,10 +241,12 @@ namespace dnGREP.Common
                         }
 
                         if (!Utils.CancelSearch)
-                            ProcessedFile(this, new ProgressStatus(processedFiles, null, file));
+                            ProcessedFile(this, new ProgressStatus(false, processedFiles, processedFiles, null, file));
 
 
                         File.SetAttributes(file, File.GetAttributes(tempFileName));
+
+                        GrepEngineFactory.ReturnToPool(file, engine);
 
                         if (Utils.CancelSearch)
                         {
@@ -205,18 +274,6 @@ namespace dnGREP.Common
                         }
                         return -1;
                     }
-                    finally
-                    {
-                        try
-                        {
-                            if (!string.IsNullOrWhiteSpace(tempFileName))
-                                Utils.DeleteFile(tempFileName);
-                        }
-                        catch
-                        {
-                            // DO NOTHING
-                        }
-                    }
                 }
             }
             finally
@@ -227,7 +284,7 @@ namespace dnGREP.Common
             return processedFiles;
         }
 
-        public bool Undo(string folderPath)
+        public bool Undo(Dictionary<string, string> undoMap)
         {
             string tempFolder = Utils.GetTempFolder();
             if (!Directory.Exists(tempFolder))
@@ -237,7 +294,12 @@ namespace dnGREP.Common
             }
             try
             {
-                Utils.CopyFiles(tempFolder, folderPath, null, null);
+                foreach(string filePath in undoMap.Keys)
+                {
+                    string sourceFile = Path.Combine(tempFolder, undoMap[filePath]);
+                    if (File.Exists(sourceFile))
+                        Utils.CopyFile(sourceFile, filePath, true);
+                }
                 return true;
             }
             catch (Exception ex)
@@ -246,5 +308,22 @@ namespace dnGREP.Common
                 return false;
             }
         }
+    }
+
+    public class ProgressStatus
+    {
+        public ProgressStatus(bool beginSearch, int processed, int successful, List<GrepSearchResult> results, string fileName)
+        {
+            BeginSearch = beginSearch;
+            ProcessedFiles = processed;
+            SuccessfulFiles = successful;
+            SearchResults = results;
+            FileName = fileName;
+        }
+        public bool BeginSearch { get; private set; }
+        public int ProcessedFiles { get; private set; }
+        public int SuccessfulFiles { get; private set; }
+        public List<GrepSearchResult> SearchResults { get; private set; }
+        public string FileName { get; private set; }
     }
 }

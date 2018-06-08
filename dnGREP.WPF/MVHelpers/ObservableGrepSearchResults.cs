@@ -141,7 +141,14 @@ namespace dnGREP.WPF
 
         public void AddRange(List<GrepSearchResult> list)
         {
-            foreach (var l in list) this.Add(new FormattedGrepResult(l, folderPath));
+            foreach (var l in list)
+                Add(new FormattedGrepResult(l, folderPath));
+        }
+
+        public void AddRange(IEnumerable<FormattedGrepResult> items)
+        {
+            foreach (var item in items)
+                Add(item);
         }
 
         private string folderPath = "";
@@ -395,13 +402,21 @@ namespace dnGREP.WPF
             bool isFileReadOnly = Utils.IsReadOnly(grepResult);
             bool isSuccess = grepResult.IsSuccess;
 
-            string basePath = Utils.GetBaseFolder(folderPath).TrimEnd('\\');
+            string basePath = string.IsNullOrWhiteSpace(folderPath) ? string.Empty :
+                Utils.GetBaseFolder(folderPath).TrimEnd('\\');
             string displayedName = Path.GetFileName(grepResult.FileNameDisplayed);
 
             if (GrepSettings.Instance.Get<bool>(GrepSettings.Key.ShowFilePathInResults) &&
                 grepResult.FileNameDisplayed.Contains(basePath))
             {
-                displayedName = grepResult.FileNameDisplayed.Substring(basePath.Length + 1).TrimStart('\\');
+                if (!string.IsNullOrWhiteSpace(basePath))
+                    displayedName = grepResult.FileNameDisplayed.Substring(basePath.Length + 1).TrimStart('\\');
+                else
+                    displayedName = grepResult.FileNameDisplayed;
+            }
+            if (!string.IsNullOrWhiteSpace(grepResult.AdditionalInformation))
+            {
+                displayedName += " " + grepResult.AdditionalInformation + " ";
             }
             int matchCount = (grepResult.Matches == null ? 0 : grepResult.Matches.Count);
             if (matchCount > 0)
