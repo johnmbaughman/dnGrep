@@ -8,6 +8,11 @@ using System.Runtime.Serialization.Formatters.Binary;
 using System.Xml;
 using System.Xml.Serialization;
 using NLog;
+using Directory = Alphaleonis.Win32.Filesystem.Directory;
+using DirectoryInfo = Alphaleonis.Win32.Filesystem.DirectoryInfo;
+using File = Alphaleonis.Win32.Filesystem.File;
+using FileInfo = Alphaleonis.Win32.Filesystem.FileInfo;
+using Path = Alphaleonis.Win32.Filesystem.Path;
 
 namespace dnGREP.Common
 {
@@ -83,7 +88,6 @@ namespace dnGREP.Common
             public const string PreviewWindowFont = "PreviewWindowFont";
             [DefaultValue(false)]
             public const string PreviewWindowWrap = "PreviewWindowWrap";
-            public const string PreviewWindowSize = "PreviewWindowSize";
             [DefaultValue(20)]
             public const string MaxPathBookmarks = "MaxPathBookmarks";
             [DefaultValue(20)]
@@ -106,6 +110,10 @@ namespace dnGREP.Common
             public const string SearchParallel = "SearchParallel";
             [DefaultValue(4.0)]
             public const string MatchTimeout = "MatchTimeout";
+            [DefaultValue(14)]
+            public const string ReplaceWindowFontSize = "ReplaceWindowFontSize";
+            [DefaultValue(false)]
+            public const string ReplaceWindowWrap = "ReplaceWindowWrap";
         }
 
         private static GrepSettings instance;
@@ -186,7 +194,7 @@ namespace dnGREP.Common
                 {
                     // Create temp file in case save crashes
                     using (FileStream stream = File.OpenWrite(path + "~"))
-                    using (XmlWriter xmlStream = XmlWriter.Create(stream, new XmlWriterSettings { Indent = false }))
+                    using (XmlWriter xmlStream = XmlWriter.Create(stream, new XmlWriterSettings { Indent = true }))
                     {
                         if (xmlStream == null)
                             return;
