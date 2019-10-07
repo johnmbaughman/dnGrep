@@ -1,8 +1,12 @@
 ﻿using System;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using dnGREP.Common;
+
+using File = Alphaleonis.Win32.Filesystem.File;
 
 namespace dnGREP.WPF
 {
@@ -20,6 +24,12 @@ namespace dnGREP.WPF
             ViewModel.ShowPreview += ViewModel_ShowPreview;
             cbWrapText.IsChecked = GrepSettings.Instance.Get<bool?>(GrepSettings.Key.PreviewWindowWrap);
             zoomSlider.Value = GrepSettings.Instance.Get<int>(GrepSettings.Key.PreviewWindowFont);
+
+            AppTheme.Instance.CurrentThemeChanged += (s, e) =>
+            {
+                textEditor.SyntaxHighlighting = ViewModel.HighlightingDefinition;
+                textEditor.TextArea.TextView.LinkTextForegroundBrush = Application.Current.Resources["AvalonEdit.Link"] as Brush;
+            };
         }
 
         public PreviewViewModel ViewModel { get; private set; } = new PreviewViewModel();
@@ -38,6 +48,7 @@ namespace dnGREP.WPF
                 textEditor.Clear();
                 textEditor.Encoding = ViewModel.Encoding;
                 textEditor.SyntaxHighlighting = ViewModel.HighlightingDefinition;
+                textEditor.TextArea.TextView.LinkTextForegroundBrush = Application.Current.Resources["AvalonEdit.Link"] as Brush;
                 for (int i = textEditor.TextArea.TextView.LineTransformers.Count - 1; i >= 0; i--)
                 {
                     if (textEditor.TextArea.TextView.LineTransformers[i] is PreviewHighlighter)
@@ -53,8 +64,10 @@ namespace dnGREP.WPF
                     {
                         if (!string.IsNullOrWhiteSpace(ViewModel.FilePath))
                         {
-                            //Title = string.Format("Previewing \"{0}\"", ViewModel.DisplayFileName);
-                            textEditor.Load(ViewModel.FilePath);
+                            using (FileStream stream = File.Open(ViewModel.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                            {
+                                textEditor.Load(stream);
+                            }
                             if (textEditor.IsLoaded)
                             {
                                 textEditor.ScrollTo(ViewModel.LineNumber, 0);
